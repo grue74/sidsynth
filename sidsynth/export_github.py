@@ -125,6 +125,15 @@ Synthesizers and a sequencer for the Commodore 64 and its SID chip, built on
 one shared core. Each program turns a C64 into one dedicated instrument,
 played from MIDI, its own keyboard and paddles.
 
+## Why
+
+The Commodore 64 has the most legendary sound chip any computer ever had, the
+SID, yet hardly any software lets you play it as a MIDI synth. SidSynth set
+out to change that: real instruments for the C64, each made for one job, in
+time with the rest of a MIDI studio. Its source is open in the hope that it
+opens the door for new synths on the C64: take the core, the synths and the
+sequencer, and build your own!
+
 **Web site: [voidhole.com/~grue/sidsynth](https://voidhole.com/~grue/sidsynth/)**,
 with each program's page, its demos to watch and hear, the manuals and the
 disk images.
