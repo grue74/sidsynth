@@ -1,0 +1,7 @@
+# LF line endings (the build scripts run under sh)
+* text=auto eol=lf
+*.prg binary
+*.d64 binary
+*.png binary
+*.pdf binary
+*.s5 binary

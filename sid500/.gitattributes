@@ -1,0 +1,8 @@
+# keep LF line endings (build scripts run under sh; 64tass and python do not care)
+* text=auto eol=lf
+*.prg binary
+*.d64 binary
+*.wav binary
+*.png binary
+*.pdf binary
+*.mp4 binary

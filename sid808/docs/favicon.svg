@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- SID808's icon: four step keys in the 808 colours on the charcoal case -->
+  <rect width="32" height="32" rx="7" fill="#232323"/>
+  <rect x="4" y="4" width="10" height="10" rx="2.5" fill="#e2412d"/>
+  <rect x="18" y="4" width="10" height="10" rx="2.5" fill="#f08a24"/>
+  <rect x="4" y="18" width="10" height="10" rx="2.5" fill="#f3c432"/>
+  <rect x="18" y="18" width="10" height="10" rx="2.5" fill="#efe7d2"/>
+</svg>

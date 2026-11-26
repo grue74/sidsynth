@@ -1,0 +1,16 @@
+c64pack - a fast-unpacking packer for Commodore 64 programs
+(tools/c64pack.py and its self-check tools/test_pack.py)
+
+Copyright (C) 2026 Jarkko Lehti (grue)
+
+The Greetings Licence
+
+You may use, copy, change and pass on this packer, and anything packed with
+it, for any purpose, free of charge, with or without changes, in source or
+in any other form.
+
+In return: when something you release was packed with it, send greetings to
+grue in the release (its greetings, credits or notes). That's all.
+
+The packer comes as it is, without any warranty: whoever uses it does so at
+their own risk.

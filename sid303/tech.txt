@@ -1,0 +1,482 @@
+SID303 - TECHNICAL NOTES
+==============================
+
+A monophonic TB-303 style bass synthesizer for the Commodore 64 with an 8580
+SID. Played from MIDI (6850 ACIA cartridge) or the C64 keyboard; paddles
+control filter cutoff and resonance, or any parameter by learn. PAL timing.
+
+Source: sid303.asm (64tass), the shared core in core/ (start-up,
+interrupts, MIDI, parameter system, paddles, keyboard, screen, test feeders;
+core/README.md lists what a synth provides), SID303's own parts in src/
+(notes, engine, hooks, keymap, params, test_scripts), tables.py (generates
+tables.inc, with helpers from core/tables_core.py), build.sh.
+tools/compare_builds.sh and tools/compare_screens.sh check refactorings:
+byte-identical builds, or routine-by-routine and VICE screen comparisons.
+
+
+1. WHAT MAKES A 303 SOUND LIKE A 303
+------------------------------------
+
+The Roland TB-303 is a very simple synth. Its character comes from a handful
+of specific behaviours rather than from complex sound generation:
+
+  - one oscillator, sawtooth or square
+  - a resonant low-pass filter (18-24 dB/octave diode ladder)
+  - a filter envelope that only decays (no attack/sustain/release), with
+    ENV MOD (depth) and DECAY knobs; it is what makes each note "squelch"
+  - ACCENT: an accented note is louder, its filter envelope is forced to the
+    shortest decay, and it gets an extra cutoff kick. The kick goes through a
+    capacitor, so consecutive accents build up ("accent sweep"), more so at
+    high resonance
+  - SLIDE: a note marked slide glides into the next one with a fixed time
+    (~60 ms RC curve) and does not retrigger the envelopes
+  - a VCA that opens instantly, fades while a note is held and closes when
+    the gate ends
+
+SID303 reproduces each of these on the SID. Section 4 shows how.
+
+
+2. PROGRAM STRUCTURE
+--------------------
+
+The machine is taken over completely: BASIC and KERNAL ROMs are banked out
+($01 = $35) and the program owns the hardware IRQ/NMI vectors ($FFFE/$FFFA).
+
+Memory
+  $0801-      BASIC stub (SYS), code, tables (~5.5 KB)
+  $02-$FF     zero page: all variables
+  $C000-$C0FF MIDI receive ring buffer (256 bytes)
+  $C100-$C13F MIDI note started by each keyboard key (so its release matches)
+  $C140-$C147 held-note stack
+  $C200-$C27F MIDI controller map (MIDI learn)
+
+Interrupts
+  The interrupt handlers do the minimum, because at 31250 baud a MIDI byte
+  arrives every ~315 CPU cycles and the 6850 holds only one byte:
+
+  IRQ  - CIA1 timer A underflow: increment tick_count, return.
+       - otherwise, on IRQ-type MIDI interfaces: if the ACIA has a byte,
+         store it in the ring buffer.
+         The CIA is checked first. The ACIA is touched only when the CIA did
+         not interrupt, so open bus at $DE00 with no cartridge can never
+         inject junk bytes. If both interrupted, the IRQ line is still low
+         after RTI and the handler runs again for the ACIA.
+  NMI  - Namesoft interface: same ring-buffer store. RESTORE also lands here
+         and does nothing.
+
+Main loop (everything else)
+  1. Parse all MIDI bytes waiting in the ring buffer.
+  2. For every timer tick not yet processed: run one synth tick (250 Hz).
+  3. Every 4th tick (62.5 Hz): read paddles, scan keyboard, draw one screen row.
+  4. When idle: draw one screen row.
+
+Timing
+  CIA1 timer A latch 3940 = 3941 cycles per tick = 250.0 Hz on PAL.
+  A synth tick takes about 20% of the CPU (measured with the TEST_TIMING build,
+  which shows each tick as a raster bar in the border). If the main loop ever
+  falls behind, ticks are caught up one by one, so no time is lost.
+
+Arithmetic
+  All curves come from tables computed by tables.py. The only run-time math
+  is 8x8 -> 16 bit multiplies by quarter squares:
+      a*b = floor((a+b)^2/4) - floor((a-b)^2/4)
+  using a 1 KB table of floor(n^2/4), n = 0..511 (~45 cycles per multiply).
+
+
+3. INPUT
+--------
+
+3.1 MIDI
+
+Interfaces (all 6850 ACIA, registers in page $DE; values from VICE's
+c64-midi.c):
+
+  Interface    control  status  rx data  divider  interrupt
+  Sequential   $DE00    $DE02   $DE03    /16      IRQ
+  Passport     $DE08    $DE08   $DE09    /16      IRQ
+  Datel/Siel   $DE04    $DE06   $DE07    /64      IRQ
+  Namesoft     $DE00    $DE02   $DE03    /16      NMI
+
+  ACIA set-up: master reset ($03), then %100101xx = receive interrupt on,
+  8 data bits, 1 stop bit, divider (31250 baud from 500 kHz or 2 MHz).
+  When the interface is changed, the previous one is master-reset first, so
+  it can't keep interrupting while the handlers look at another address.
+  The handlers' ACIA addresses are patched into their LDA operands
+  (self-modifying code).
+
+Parser
+  - Running status.
+  - Realtime bytes ($F8-$FF: clock, start, stop...) are dropped wherever
+    they appear, even inside a message.
+  - SysEx and system common cancel running status.
+  - Channel filter: Omni or 1-16.
+  - Note on (velocity 0 = note off), note off, pitch bend (+-2 semitones).
+  - Control change: cc_map ($C200, 128 bytes) gives the parameter each
+    controller sets, $FF = none. At start:
+      CC 74 cutoff, 71 resonance, 12 env mod, 75 decay, 13 accent,
+      5 slide time, 7 volume, 72 amp decay.
+    The value 0..127 is scaled to the parameter's range. A changed value
+    goes through param_changed, as from the keyboard, so a waveform knob
+    retriggers a sounding note. 120/123 = all notes off; 121-127 are ignored.
+  - MIDI learn: RETURN sets learn_mode (only for parameters below MIDI
+    channel). The next controller 0..119 is assigned to the selected
+    parameter: every other controller of that parameter is removed first,
+    so a parameter has one controller, and learn_mode ends. DEL removes the
+    selected parameter's controllers and its paddle. Assignments live in
+    RAM only. A paddle moved in learn mode is assigned the same way (3.3).
+  - Velocity >= 110 = accented note.
+
+3.2 Keyboard
+
+The KERNAL is not used. The 8x8 matrix is scanned directly at 62.5 Hz: each
+CIA1 port A column is driven low in turn and port B is read, which gives
+press AND release events and any number of simultaneous keys.
+
+  - Changes against the previous scan become key events, releases first.
+    So lifting one finger and pressing the next in the same 16 ms doesn't
+    count as a slide.
+  - Notes use a tracker layout:
+      lower row  Z S X D C V G B H N J M , L . ; /
+      upper row  Q 2 W 3 E R 5 T 6 Y 7 U I 9 O 0 P @
+    SHIFT plays an accented note (velocity 127, otherwise 80).
+  - Each key remembers the MIDI note it started, so changing octave while
+    holding a key can't leave a stuck note.
+  - Commands:
+      F1/F2      select parameter
+      F3/F4 +/-  change value (repeats after 0.32 s, then 20 per second)
+      F5/F6      octave
+      F7         waveform
+      F8, STOP   all notes off
+      RETURN     learn on/off for the selected parameter (MIDI knob or paddle)
+      DEL        remove the selected parameter's MIDI controller and paddle
+    SHIFT turns F1, F3, F5 and F7 into F2, F4, F6 and F8.
+
+3.3 Paddles
+
+The SID's POTX/POTY read the control port selected by CIA1 port A bits 6/7.
+These bits are also keyboard columns, so after each keyboard scan port A is
+left on the paddle select value ($7F = port 1, $BF = port 2). The SID needs
+512 cycles to measure, so the reading is taken just before the next scan,
+16 ms later.
+
+  - Each reading is averaged with the previous one to reduce jitter.
+  - Soft takeover: a paddle changes its parameter only after it moves by 3 or
+    more. Keys and MIDI CCs therefore don't fight the paddle, and an empty
+    port (constant $FF) is ignored.
+  - Each paddle sets the parameter in pad_param (X = Cutoff, Y = Resonance
+    at start). The reading is inverted, so clockwise raises the value
+    (checked on real paddles), and goes through param_set_v like a MIDI
+    knob: scaled onto the parameter's range, side effects only on a change.
+  - Learn: in learn mode the first paddle that takes over is assigned to the
+    selected parameter (if it is learnable), the other paddle lets go of
+    that parameter, and learn mode ends. DEL clears it. The P column shows
+    X or Y.
+
+
+4. THE SOUND ENGINE (one synth tick, 250 Hz)
+---------------------------------------------
+
+4.1 Notes, legato and slide
+
+Held notes live in an 8-deep stack; the newest one sounds (last-note
+priority).
+
+  - Note on, nothing else held: a new note. The pitch jumps, the filter, amp
+    and (if accented) accent envelopes restart, and the SID gates are
+    retriggered.
+  - Note on while another note is held (legato): a SLIDE. Only the target
+    pitch changes; nothing retriggers. This is the usual way to send 303
+    slides over MIDI.
+  - Note off of the sounding note while others are held: slide back to the
+    newest held note.
+  - Note off of the last note: gates close.
+
+4.2 Pitch
+
+Pitch is 16-bit: high byte = semitone (MIDI note - 12), low byte = fraction.
+
+  - Slide: each tick, current pitch moves k/256 of the remaining distance
+    towards the target. This is an exponential, RC-like glide with a constant
+    time, as on the 303 (not a constant rate). SLIDE 0..15 = time constant
+    10 ms .. 300 ms; the default 8 is ~61 ms.
+  - Sounding pitch = current + bend + tune (tune = +-1/2 semitone).
+  - SID frequency: a 97-entry table holds the PAL SID value of each semitone
+    from C0 to C8. The value is interpolated linearly between two semitones by
+    the fraction, which gives smooth slides and bends.
+  - Notes outside C0..B7 are folded in by octaves.
+  - All three voices get the same frequency.
+
+4.3 Filter (the 303's VCF and its envelope)
+
+The 8580 has one 12 dB/octave multimode filter. Its cutoff register (11 bits)
+is roughly linear in Hz, from about 30 Hz to 12 kHz. Knobs and envelopes need
+to move in octaves, so all filter math is done on a log-cutoff index 0..255:
+
+  index 0..255 -> 40 Hz .. 12 kHz, exponential (~31 steps per octave)
+  register = (f - 30) * 2047 / 12000    (cutoff_lo/cutoff_hi tables)
+
+Every tick:
+
+  index = CUTOFF
+        + filter_env * ENVMOD / 512        (up to ~4 octaves)
+        + accent_sweep * ACCENT * 4 / 256  (up to ~2 octaves)
+        - ENV_PIVOT * ENVMOD / 512         (Env mod type "Centred" only)
+  clamped to 0..255, looked up, written to $D415/$D416.
+
+Env mod type: Centred (default) or Up only
+  On the 303 the envelope reaches the exponential converter through the
+  ENV MOD pot, whose other end sits at a fixed ~3 V; the envelope swings
+  from ~5 V down to ~0.5 V. So ENV MOD scales the swing around a fixed
+  middle: more ENV MOD opens the filter further at the start of a note and
+  closes it further at the end, while the middle of the sweep stays put.
+  "Centred" copies this by subtracting the pivot (env level
+  ENV_PIVOT/255) times ENVMOD. ENV_PIVOT = 140: 140/255 = 0.55 =
+  (3 - 0.5) / (5 - 0.5). At ENVMOD 255 the floor drops ~70 steps, about
+  2.2 octaves. "Up only" leaves the pivot out, so the envelope only opens
+  the filter above CUTOFF (the behaviour before this parameter existed).
+  The parameter can be switched while playing, or by MIDI learn (CC 0-63 =
+  Up only, 64-127 = Centred).
+
+Filter envelope (the 303's MEG)
+  - 16 bits, set to $FFFF at each new (non-slid) note.
+  - Each tick: env -= env * k / 65536, an exponential decay.
+  - DECAY 0..15 = time constant 0.12 s .. 2.5 s.
+  - An accented note uses a fixed ~0.2 s instead, as the 303 forces its
+    shortest decay on accents.
+
+At 250 Hz the cutoff changes every 4 ms, so even the fastest decays sweep
+smoothly instead of stepping.
+
+Resonance (0..15) goes to $D417 bits 4-7. Filter mode: low-pass (303),
+low+band, band-pass or high-pass. Voices 1 and 2 go through the filter; voice
+3 doesn't.
+
+Low+band turns on the 8580's low-pass and band-pass outputs together. The
+band-pass output adds to the peak at the cutoff, which makes up a little for
+the 8580's mild resonance. The price is a gentler slope above the cutoff
+(the band-pass output falls at 6 dB/octave), which is further from the 303.
+Measured in VICE on a long A1 note at resonance 15: the resonant bump
+(harmonics 9-14, ~500-770 Hz) is ~2 dB higher than in low-pass, and the 16th
+harmonic is 3 dB higher. Mixed filter outputs are emulated less exactly than
+single ones, so this needs a listen on a real 8580.
+
+4.4 Accent
+
+  - Loudness: every note has the base level 15 - ACCENT/2. An accented
+    note starts at SID sustain level 15 and falls back to the base level
+    as the accent envelope decays (~0.2 s), the same envelope that drives
+    the accent sweep. On the 303 the accent also goes to the VCA, so an
+    accented note has a louder attack ("pluck") rather than staying louder
+    throughout. ACCENT sets the size of the pluck.
+    Measured (accent 10): accented 16ths start 3 dB above normal ones; a
+    long accented note falls 4.4 dB in 300 ms (1.3 dB before the pluck was
+    added, the rest being the amp fade and the filter envelope).
+  - Short filter decay (see 4.3).
+  - Accent sweep: an accent envelope (~0.2 s decay) is followed by a
+    "capacitor" value, the sweep:
+      charging    with a time constant set by resonance:
+                  6 ms at resonance 0 .. 60 ms at 15
+      discharging with a time constant set by resonance:
+                  20 ms at resonance 0 .. 400 ms at 15
+    The 303's resonance pot is a dual pot whose second half puts the
+    accent pulse through an RC filter, so at high resonance the kick rises
+    slowly: the "waaaoow" of an accented note. Modelled with the engine's
+    tables (accent 0.2 s): at resonance 15 the first accent's sweep peaks
+    after ~100 ms at 149/255 (16 ms and 228 before); at resonance 0 it is
+    unchanged. Back-to-back accents still build up (4th accent: 202).
+    At high resonance the sweep can't discharge between 16th notes, so a run
+    of accents pushes the cutoff higher and higher. This copies the
+    resonance-dependent accent build-up of the 303.
+
+4.5 VCA and amplitude envelope
+
+The SID ADSR is used as a plain gate: attack 0 (2 ms), decay 0, release 0
+(6 ms), with the sustain level as the loudness.
+
+  - With every rate at 0, the envelope rate counter can never be above the
+    period it is compared to. That is what causes the SID's "ADSR delay bug",
+    where a retriggered note starts up to 33 ms late or not at all. So fast
+    303 patterns never drop or smear notes, and no "hard restart" delay is
+    needed.
+  - Retrigger: gates off, new sustain levels, gates on. This is done at once
+    when the note arrives, not on the next tick.
+  - Amp fade: a third software envelope (AMP DECAY 0..14 = time constant
+    0.15 s .. 4 s, 15 = no fade) scales the sustain level of each voice down
+    during the note. The SID follows a lowered sustain level by decaying to
+    it, so held notes fade like a 303's. Levels only ever fall during a note,
+    because the SID can't raise a sustain level mid-note. For the same reason,
+    changing Waveform, Square tilt or Body while a note sounds retriggers it.
+    The fade has 16 steps.
+
+  Per voice:
+    note    = base level + accent gap * accent envelope   (4.4)
+    amp     = note * amp envelope
+    voice 1 = amp, or amp * TILT/15 in 303-square mode
+    voice 2 = amp                                  (303-square pulse)
+    voice 3 = amp * BODY/15 * body_res_scale[RESO] (body triangle)
+
+  These are computed on 8-bit levels and cut to the SID's 4 bits at the
+  end. Voice 3's level is also held so it never rises during a note (turning
+  resonance down mid-note would raise it, and a SID voice whose sustain
+  level is raised decays to silence instead).
+
+4.6 Waveforms
+
+  Saw          voice 1 sawtooth (the 303's main waveform)
+  Square       voice 1 pulse; PULSE WIDTH 3% .. 50%
+  Saw+square   voice 1 8580 combined waveform (not a 303 sound)
+  303 square   voice 2 pulse + voice 1 saw, mixed into the filter
+
+The 303's square isn't a clean square: it is made from the saw by a
+transistor waveshaper and has a slanted top. To imitate it:
+
+  - Voice 2's pulse is hard-synced to voice 1. Voice 2 is reset every cycle
+    of voice 1, so the two waveforms keep the same phase relation on every
+    note.
+  - Voice 1's saw, mixed under the pulse at level TILT, slants the pulse's
+    flat parts. That makes the waveform asymmetric and adds even harmonics,
+    which a plain square doesn't have.
+
+  Measured, unfiltered, A1:
+    2nd harmonic   plain square -43 dB, tilt 6 -18 dB, tilt 10 -12 dB
+    odd harmonics  unchanged
+
+This is an approximation of the 303's waveshaped square, not a copy of it.
+An earlier attempt with a triangle under the pulse changed the spectrum by
+less than 1 dB and was dropped.
+
+Body (voice 3): an unfiltered triangle on the fundamental for a rounder
+bottom. It isn't a 303 feature; BODY 0 turns voice 3 off.
+
+Resonance thins the body: on the 303, more resonance loses bass, which the
+8580 filter doesn't do. Body carries the low end, so its level is scaled by
+body_res_scale: 0 dB at resonance 0 down to -6 dB at 15 (measured -5 dB,
+because of the 16 level steps).
+
+
+5. HOW CLOSE IT IS, AND WHY NOT CLOSER
+---------------------------------------
+
+Matches the 303's behaviour:
+  - exponential filter decay
+  - log cutoff with envelope depth, centred around Cutoff like the 303's
+    (Env mod type, 4.3)
+  - accent: louder, shorter decay, cutoff kick, resonance-dependent build-up
+    and slower rise at high resonance
+  - constant-time RC slide without retrigger, triggered by legato
+  - held-note volume fade
+  - instant, reliable retriggers
+
+Measured in VICE (reSID 8580):
+  - Pitches are exact (C2 65.37 Hz, D2 73.43 Hz, E2 82.40 Hz).
+  - Slides glide through intermediate pitches.
+  - At low cutoff the filter envelope removes 7-11 dB above 4 kHz within
+    75 ms of each note.
+
+Differences:
+  - Filter slope: the 8580 filter is 12 dB/octave; the 303's is ~18-24.
+    The sound is brighter and buzzier, with less of the round, rubbery
+    303 bass. This is the biggest difference, and software can't fix it:
+    the SID has a single filter, and all filtered voices share it.
+    Hardware route to fix it: two SIDs in series (SID 1 output into SID 2's
+    EXT IN, both cutoffs driven together) would give a cascaded 24 dB
+    low-pass.
+  - Resonance: on the 303, more resonance thins out the bass. The 8580
+    doesn't behave that way, and its peak is milder. Only the Body voice is
+    turned down with resonance (4.6); the filtered voices keep their bass.
+  - Oscillator: the SID saw is clean and digital. The 303 square is only
+    approximated (4.6).
+  - No distortion, which many classic acid sounds rely on.
+  - The parameter ranges and curves (cutoff span, env mod depth, decay and
+    slide times, accent sweep) are based on how the 303 works. They have not
+    been fitted to recordings of a real 303.
+
+
+6. SCREEN
+---------
+
+Mixed-case character set, screen at $0400.
+  - Row 0, title: program name and build number, and the P and CC column
+    heads.
+  - Rows 1-18: one parameter per row. Name, then a 16-cell bar and a number,
+    or a name for choice parameters; ">" marks the selected one. Column 36
+    (P): X or Y if a paddle controls the parameter. Columns 37-39 (CC): the
+    parameter's MIDI controller (lowest number if several), "???" while it
+    is being learnt.
+  - Row 19, status: octave, sounding note, last velocity, Acc/Slide flags of
+    the sounding note, MIDI activity indicator (lit by note and controller
+    data, not by clock bytes). In learn mode the row is replaced by a
+    reversed "Learn: knob/paddle" prompt.
+  - Rows 20-24: help.
+
+Rows are redrawn one at a time: when the main loop is idle, and at least
+once per keyboard scan. Each row's cells are written straight over the old
+ones, never blanked first, so there is no flicker.
+
+
+7. TEST BUILDS
+--------------
+
+64tass -D options (see build.sh):
+
+  TEST_MIDI=1        feeds a 16-step acid line plus one bar of long notes
+                     through the real MIDI parser. It exercises running
+                     status, clock bytes inside messages, accents, slides
+                     and CC74 changes. This is sid303-test.prg, and it
+                     made demos 1-5.
+  TEST_MIDI=2        the same line for eight bars at resonance 15 (CC71),
+                     with a CC74 on every step sweeping the cutoff from
+                     closed to fully open and back twice (two bars up, two
+                     down). This is
+                     sid303-sweep.prg; it made demos 6-8 (7 and 8 with harder
+                     start-up settings, see README).
+  TEST_KEYS=1        replaces the matrix read with a scripted key sequence.
+                     It exercises F-keys, auto-repeat, wrap-around, octave
+                     limits, interface switching, notes, slide and accent.
+  TEST_KEYS=3 with TEST_PADDLES=1
+                     paddle learn: paddle X turns by itself (one step per
+                     scan, $FF down to 0) while the script selects Decay,
+                     learns X onto it, then removes Resonance's paddle Y and
+                     CC with DEL. Expected end state in the comment above the
+                     script; checked in VICE.
+  TEST_KEYS=2 with TEST_MIDI=3
+                     MIDI learn: scripted RETURN/DEL/F1 presses and matching
+                     controller messages: learn, reassign a knob to another
+                     parameter, remove a controller, learn a waveform knob,
+                     refused learn on MIDI channel. Expected end state in the
+                     comment above the script.
+  TEST_TIMING=1      border colour shows the CPU time of each synth tick.
+  FILTER_ROUTING=0   no voice through the filter (raw waveform measurements).
+  MIDI_IF_DEFAULT, WAVE_DEFAULT, AMPDECAY_DEFAULT, BLEND_DEFAULT, BODY_DEFAULT,
+  RESO_DEFAULT, FILTER_DEFAULT, ENVMOD_DEFAULT, DECAY_DEFAULT, ACCENT_DEFAULT
+                     start-up settings.
+  BUILD=n            build number in the title row (build.sh: git commit
+                     count, +1 with uncommitted changes; 0 if not given).
+  ENVTYPE_DEFAULT=0  start with Env mod type "Up only" (default 1, Centred).
+  ENV_PIVOT=n        pivot of the centred env mod, env level n/255 (140).
+                     See 4.3.
+
+Verified in VICE x64sc with reSID 8580:
+  - MIDI cartridge emulation enabled for all four interface types: no
+    interrupt storms.
+  - Notes, slides, accents and the amp fade checked in WAV recordings
+    analysed with FFT/RMS.
+  - Keyboard paths checked with TEST_KEYS.
+
+Verified on a real C64 (reported by users):
+  - MIDI input through a Kerberos cartridge in Datel mode
+  - paddle direction (clockwise raises the value)
+
+Not verified:
+  - the Sequential, Passport and Namesoft modes on real cartridges
+  - real 8580 sound against the VICE recordings
+
+
+8. LIMITS
+---------
+
+  - PAL only. On NTSC, pitch runs ~2/3 semitone sharp and envelopes ~4% fast.
+  - Maplin MIDI interface not supported: it has no interrupt.
+  - The C64 keyboard matrix can ghost with 3+ keys. Paddle fire buttons share
+    lines with the keyboard and should not be pressed.
+  - RESTORE does nothing; leave the program with a reset.

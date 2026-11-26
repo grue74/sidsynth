@@ -1,0 +1,2 @@
+# keep LF line endings (64tass and python do not care; shell scripts need it)
+* text=auto eol=lf

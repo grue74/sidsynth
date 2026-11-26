@@ -1,0 +1,5 @@
+# keep LF line endings (build.sh runs under sh; 64tass and python don't care)
+* text=auto eol=lf
+*.prg binary
+*.d64 binary
+*.wav binary

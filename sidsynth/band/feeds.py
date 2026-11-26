@@ -1,0 +1,138 @@
+# Copyright (C) 2026 Jarkko Lehti
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Each synth's part of the cover as a test build that plays it by itself:
+the core's test feed (core/test_feed.asm) gives the MIDI bytes to the
+synth's own MIDI parser, timed in the synth's ticks, so the render
+(c64tools/vicerec.py) is exact and the same every time.
+
+    python feeds.py work/cover.mid work/feeds [--song glide]
+
+For SID101, SID303 and SID808: a wrapper source (work/feeds/<synth>-cover.asm)
+that includes the synth's program as it is, with TEST_MIDI=99 (no feed of
+its own) and VIDEO_MARK=1 (vicerec's frame mark), and puts the part after
+the program as test_pattern; assembled into work/feeds/<synth>-cover.prg
+(+ .lbl). The synth projects' sources don't change.
+
+Every part starts LEAD seconds after the synth starts (its first sound, a
+program change for SID101's preset, at once), so the renders line up at
+their starts. Note offs go as note on, velocity 0, under running status:
+two bytes a message.
+"""
+import os
+import subprocess
+import sys
+
+import mido
+
+from songs import pick
+
+PROJECTS = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PAL_CLOCK = 985248
+LEAD = 2.0                      # seconds from the synth's start to the song's first beat
+PATTERN_RAM = 0x8000            # the feed must end below (the synths' patterns)
+# synth: (project folder, MIDI channel 0-based, timer latch); the set-up
+# messages before the song are the song's (songs.py)
+SYNTHS = {"sid101": ("sid101", 0, 3940),
+          "sid303": ("sid303", 1, 3940),
+          "sid808": ("sid808", 9, 1969)}
+
+
+def part(path, ch, tempo):
+    """The file's messages on channel ch: [(seconds from the first beat, bytes)]."""
+    mid = mido.MidiFile(path)
+    out = []
+    for tr in mid.tracks:
+        t = 0
+        for m in tr:
+            t += m.time
+            if not m.is_meta and m.channel == ch:
+                out.append((t / mid.ticks_per_beat * 60 / tempo, list(m.bytes())))
+    return sorted(out, key=lambda e: e[0])
+
+
+def feed_bytes(events, tick_hz, setup):
+    """The test feed: entries count, bytes..., wait (ticks to the next - 1);
+    gaps over 256 ticks bridged with active sensing ($FE, ignored); same
+    tick messages in one entry; running status; ends with 0 after a long
+    rest (so the feed's restart comes well after the song)."""
+    # an entry at tick 0 (active sensing, ignored), so the wait to the
+    # first event is in the feed (the first entry plays at once)
+    timed = [(0, [0xFE])] + [(0, m) for m in setup] +         [(round((LEAD + s) * tick_hz), m) for s, m in events]
+    timed.sort(key=lambda e: e[0])
+    entries, status = [], None
+    for t, m in timed:
+        if m[0] & 0xF0 == 0x80:                     # note off -> note on, velocity 0
+            m = [0x90 | (m[0] & 0x0F), m[1], 0]
+        b = m[1:] if m[0] == status and m[0] < 0xF0 else m
+        status = m[0] if m[0] < 0xF0 else status
+        if entries and entries[-1][0] == t:
+            entries[-1][1].extend(b)
+        else:
+            entries.append((t, list(b)))
+    entries.append((entries[-1][0] + int(30 * tick_hz), [0xFE]))   # a rest after the song
+    data = []
+    for i, (t, b) in enumerate(entries):
+        nxt = entries[i + 1][0] if i + 1 < len(entries) else t + 1
+        wait = nxt - t - 1
+        while wait > 255:
+            data += [len(b)] + b + [255]
+            b = [0xFE]
+            wait -= 256
+        data += [len(b)] + b + [wait]
+    data.append(0)
+    return data
+
+
+def version_defines(proj):
+    """The build number (and SID808's version) the synth's title row shows,
+    as its build.sh gives them: build-number.txt, version.txt."""
+    out = []
+    num = os.path.join(proj, "build-number.txt")
+    if os.path.exists(num):
+        out += ["-D", "BUILD=" + open(num).read().strip()]
+    ver = os.path.join(proj, "version.txt")
+    if os.path.exists(ver):                     # "v0.9.0 build 49"
+        v, _, b = open(ver).read().split()
+        major, minor, patch = v[1:].split(".")
+        out = ["-D", f"BUILD={b}", "-D", f"V_MAJOR={major}", "-D", f"V_MINOR={minor}",
+               "-D", f"V_PATCH={patch}"]
+    return out
+
+
+def main():
+    song = pick(sys.argv)
+    src, out = sys.argv[1], os.path.abspath(sys.argv[2])
+    os.makedirs(out, exist_ok=True)
+    for name, (folder, ch, latch) in SYNTHS.items():
+        setup = song["setup"].get(name, [])
+        proj = os.path.join(PROJECTS, folder)
+        tick_hz = PAL_CLOCK / (latch + 1)
+        events = part(src, ch, song["tempo"])
+        if name == "sid808":            # its note_off does nothing (voices.asm): not fed
+            events = [(t, m) for t, m in events
+                      if not (m[0] & 0xF0 == 0x80 or (m[0] & 0xF0 == 0x90 and m[2] == 0))]
+        data = feed_bytes(events, tick_hz, setup)
+        asm = os.path.join(out, f"{name}-{song['key']}.asm")
+        with open(asm, "w", newline="\n") as f:
+            f.write(f"; generated by feeds.py: {name} playing its part of {song['name']} by itself\n")
+            f.write(f'        .include "{os.path.join(proj, folder + ".asm").replace(os.sep, "/")}"\n')
+            f.write("test_pattern                    ; (core/test_feed.asm, TEST_MIDI=99)\n")
+            for i in range(0, len(data), 16):
+                f.write("        .byte " + ", ".join(f"${b:02x}" for b in data[i:i + 16]) + "\n")
+            f.write("feed_end\n")
+            f.write(f'        .cerror feed_end > ${PATTERN_RAM:04x}, "the feed runs into the patterns"\n')
+        prg = os.path.join(out, f"{name}-{song['key']}.prg")
+        r = subprocess.run(["64tass", "-I", "..", "-C", "-a", "-q", "--cbm-prg", *version_defines(proj),
+                            "-D", "TEST_MIDI=99",
+                            "-D", "VIDEO_MARK=1", "-I", proj, "-l", prg + ".lbl", "-o", prg, asm],
+                           cwd=proj, capture_output=True, text=True)
+        if r.returncode:
+            print(r.stdout, r.stderr)
+            sys.exit(f"{name}: build failed")
+        lab = {l.split("=")[0].strip(): l.split("=")[1].strip() for l in open(prg + ".lbl") if "=" in l}
+        print(f"{name}: {len(data)} feed bytes at {lab.get('test_pattern')}..{lab.get('feed_end')}, "
+              f"video_frame {lab.get('video_frame')}, {tick_hz:.4f} Hz")
+
+
+if __name__ == "__main__":
+    main()

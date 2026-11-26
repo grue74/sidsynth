@@ -1,0 +1,10 @@
+# build output and test builds
+tables.inc
+build-number.txt
+*.lst
+*.lbl
+__pycache__/
+# renders, captures and the web site as built
+work/
+sidsynth/site/
+sid500/src/demo_keys.inc
