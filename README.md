@@ -4,6 +4,10 @@ Synthesizers and a sequencer for the Commodore 64 and its SID chip, built on
 one shared core. Each program turns a C64 into one dedicated instrument,
 played from MIDI, its own keyboard and paddles.
 
+**Web site: [voidhole.com/~grue/sidsynth](https://voidhole.com/~grue/sidsynth/)**,
+with each program's page, its demos to watch and hear, the manuals and the
+disk images.
+
 | Folder | What it is |
 |---|---|
 | `sid303/` | **SID303**, an acid bass synth in the spirit of the TB-303, with its own step sequencer |
