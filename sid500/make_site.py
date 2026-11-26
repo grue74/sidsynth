@@ -327,7 +327,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 14px; border-top: 1px
     <tr><th>MIDI thru</th><td>About 3 ms stopped; playing, median about 9 ms at 120 BPM.</td></tr>
     <tr><th>The synths, note on to sound</th><td>SID303 median 2.4 ms (1.3-4.7), SID101 2.3 ms (1.3-5.7), SID808 7 ms (5.3-9.5, a 5 ms envelope settle that keeps soft hits clean).</td></tr>
   </table>
-  <p class="note">Measured in VICE with its MIDI interface sending at the real wire's pace (10 bits a byte, as a real 6850 does: checked on a Kerberos cartridge), not counting MIDI's own 1 ms for a note on's three bytes.</p>
+  <p class="note">Measured in VICE, with my fork <a href="https://github.com/grue74/vice-gsync">vice-gsync</a>: stock VICE's MIDI interface sends a byte every 9 bit times, about 11 % faster than the real wire, so it makes MIDI timing look better than it is on hardware. The fork <a href="https://github.com/grue74/vice-gsync/commit/b101196985f5ef67fd48e45d33e6f17bf6faccaf">corrects it to 10 bit times</a>, as a real 6850 sends (checked on a Kerberos cartridge on a real C64). Not counting MIDI's own 1 ms for a note on's three bytes.</p>
 
   <footer>SID500 build %BUILD% · © 2026 Jarkko Lehti · Free software under the <a href="files/LICENSE.txt">GNU GPL v3 or later</a>; the source is in the downloads above. Part of <a href="../">SidSynth</a>, with SID101, SID303 and SID808.</footer>
 </main>

@@ -230,6 +230,12 @@ SidSynth program needs its slot set to the interface it is set to.
 
 Keep these in step with the sections above.
 
+- **How measured:** in VICE, with the author's fork vice-gsync
+  (https://github.com/grue74/vice-gsync, commit b101196985): stock VICE's
+  MIDI interface sends a byte every 9 bit times, ~11 % faster than the real
+  wire, flattering MIDI timing; the fork sends 10, as a real 6850 does
+  (checked on a Kerberos on a real C64).
+
 - **SID500 timing:** notes and clock on a fixed grid from CIA1's timer,
   rendered ~42 ms ahead: ticks within 0.3 ms of exact, MIDI clock 0.4-0.5
   ms after its tick, clock gaps steady within ~0.5 ms; at most ~3 ms added

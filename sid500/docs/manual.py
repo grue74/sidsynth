@@ -522,9 +522,12 @@ story += [
 story += [
     P("12. Timing and limits", h1),
     P("Timing", h2),
-    P("Measured in the VICE emulator with its MIDI interface at the real wire's pace (as a real "
-      "6850 sends, checked on a Kerberos cartridge), not counting MIDI's own 1 ms for a note "
-      "on's three bytes:"),
+    P("Measured in the VICE emulator, with the author's fork <b>vice-gsync</b> "
+      "(github.com/grue74/vice-gsync): stock VICE's MIDI interface sends a byte every 9 bit "
+      "times, about 11 % faster than the real wire, which makes MIDI timing look better than it "
+      "is on hardware; the fork corrects it to 10 bit times, as a real 6850 sends (checked on a "
+      "Kerberos cartridge on a real C64). Not counting MIDI's own 1 ms for a note on's three "
+      "bytes:"),
     table([
         ["What", "Measured"],
         ["Notes and clock", "From the C64's timer, worked out about 42 ms ahead: ticks within "

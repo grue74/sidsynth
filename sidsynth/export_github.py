@@ -41,7 +41,7 @@ AUTHOR = "Jarkko Lehti <43750721+grue74@users.noreply.github.com>"
 
 SKIP_EXT = (".wav", ".mp3", ".mp4", ".lst", ".lbl")
 SKIP_NAMES = ("CLAUDE.md", ".gitmodules", "build-number.txt")
-SKIP_PATHS = ("docs/shared-parts.md", "upload.sh")
+SKIP_PATHS = ("docs/shared-parts.md", "upload.sh", "stats.py")   # (stats.py: the private server's logs)
 SKIP_DIRS = ("work/", "proto/", "docs/reference/", "docs/experiments/", ".claude/")
 TOOLS = [("packer", "c64pack.py"), ("packer", "test_pack.py"), ("c64tools", "d64.py")]
 
@@ -97,9 +97,9 @@ def portable(text, path):
                             'os.path.join(os.path.dirname(os.path.dirname('
                             'os.path.abspath(__file__))), "core")')
         text = text.replace('os.path.join(os.path.dirname(ROOT), "core"', 'os.path.join(os.path.dirname(ROOT), "core"')
-    if path == "README.md" and "upload.sh" in text:    # (the site's: the upload is private)
-        text = "".join(line for line in text.splitlines(keepends=True)
-                       if "upload.sh" not in line)
+    if path == "README.md" and "upload.sh" in text:    # (the site's: its upload and stats
+        text = "".join(line for line in text.splitlines(keepends=True)   # are private)
+                       if "upload.sh" not in line and "stats.py" not in line)
     return text
 
 
